@@ -10,8 +10,8 @@ app = FastAPI(title="NicheBreaker API Bridge")
 # Allow frontend to access this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Replace with Vercel URL in production
-    allow_credentials=True,
+    allow_origins=["*"], # Allow all origins
+    allow_credentials=False, # Must be False if origins is ["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
