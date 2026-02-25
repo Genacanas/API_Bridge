@@ -30,8 +30,9 @@ STATUS_MAP_TO_DB = {
 }
 
 CREATIVE_TYPE_MAP = {
-    1: "image",
-    2: "video"
+    0: "image",
+    1: "video",
+    2: "carousel"
 }
 
 class TopCreative(BaseModel):
@@ -76,12 +77,12 @@ def get_pages(
                 a.creativeUrl,
                 a.creative_type,
                 a.AdSnapshotUrl
-            FROM pagesProducts pp
-            INNER JOIN pages pg ON pp.pageId = pg.Id
+            FROM pages pg
+            LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
             LEFT JOIN ads a ON a.pageId = pg.Id
-            WHERE pp.status = ?
+            WHERE (pp.status = ? OR (pp.status IS NULL AND ? = 0))
         """
-        params = [db_status]
+        params = [db_status, db_status]
         
         if searchTerm and searchTerm != "All":
             query += " AND pg.Name LIKE ?"
@@ -171,3 +172,46 @@ def update_page_status(
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+COUNTRY_LIST = ["ALL", "BR", "IN", "GB", "US", "CA", "AR", "AU", "AT", "BE", "CL", "CN", "CO", "HR", "DK", "DO", "EG", "FI", "FR", "DE", "GR", "HK", "ID", "IE", "IL", "IT", "JP", "JO", "KW", "LB", "MY", "MX", "NL", "NZ", "NG", "NO", "PK", "PA", "PE", "PH", "PL", "RU", "SA", "RS", "SG", "ZA", "KR", "ES", "SE", "CH", "TW", "TH", "TR", "AE", "VE", "PT", "LU", "BG", "CZ", "SI", "IS", "SK", "LT", "TT", "BD", "LK", "KE", "HU", "MA", "CY", "JM", "EC", "RO", "BO", "GT", "CR", "QA", "SV", "HN", "NI", "PY", "UY", "PR", "BA", "PS", "TN", "BH", "VN", "GH", "MU", "UA", "MT", "BS", "MV", "OM", "MK", "LV", "EE", "IQ", "DZ", "AL", "NP", "MO", "ME", "SN", "GE", "BN", "UG", "GP", "BB", "AZ", "TZ", "LY", "MQ", "CM", "BW", "ET", "KZ", "NA", "MG", "NC", "MD", "FJ", "BY", "JE", "GU", "YE", "ZM", "IM", "HT", "KH", "AW", "PF", "AF", "BM", "GY", "AM", "MW", "AG", "RW", "GG", "GM", "FO", "LC", "KY", "BJ", "AD", "GD", "VI", "BZ", "VC", "MN", "MZ", "ML", "AO", "GF", "UZ", "DJ", "BF", "MC", "TG", "GL", "GA", "GI", "CD", "KG", "PG", "BT", "KN", "SZ", "LS", "LA", "LI", "MP", "SR", "SC", "VG", "TC", "DM", "MR", "AX", "SM", "SL", "NE", "CG", "AI", "YT", "CV", "GN", "TM", "BI", "TJ", "VU", "SB", "ER", "WS", "AS", "FK", "GQ", "TO", "KM", "PW", "FM", "CF", "SO", "MH", "VA", "TD", "KI", "ST", "TV", "NR", "RE", "LR", "ZW", "CI", "MM", "AN", "AQ", "BQ", "BV", "IO", "CX", "CC", "CK", "CW", "TF", "GW", "HM", "XK", "MS", "NU", "NF", "PN", "BL", "SH", "MF", "PM", "SX", "GS", "SD", "SS", "SJ", "TL", "TK", "UM", "WF", "EH"]
+
+class SearchTermRequest(BaseModel):
+    country: str
+    search_term: str
+    min_ad_creation_time: Optional[str] = None
+
+from datetime import datetime
+
+@app.post("/api/search_terms")
+def create_search_term(
+    term_data: SearchTermRequest,
+    db: pyodbc.Connection = Depends(get_db)
+):
+    try:
+        cursor = db.cursor()
+        
+        country_index = 0 # Default to ALL
+        try:
+            country_index = COUNTRY_LIST.index(term_data.country.upper())
+        except ValueError:
+            pass
+            
+        cursor.execute("SELECT TOP 1 Id FROM niches")
+        niche_row = cursor.fetchone()
+        niche_id = niche_row.Id if niche_row else 1
+        
+        query = """
+            INSERT INTO searchTerms 
+            (nicheId, searchTerm, countryType, searchCreativeType, lastUpdated, isUpdateable, scrapeFully)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        now = datetime.utcnow()
+        params = [niche_id, term_data.search_term, country_index, 0, now, True, True]
+        
+        cursor.execute(query, params)
+        db.commit()
+        
+        return {"success": True, "message": "Search term created successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
