@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 import pyodbc
 from database import get_db
 
@@ -55,9 +55,12 @@ class StatusUpdateRequest(BaseModel):
 @app.get("/api/pages", response_model=List[PageData])
 def get_pages(
     status: str = "unprocessed",
+    searchTerm: Optional[str] = None,
     country: Optional[str] = None,
     category: Optional[str] = None,
-    searchTerm: Optional[str] = None,
+    min_reach: int = Query(default=200000, ge=0, description="Minimum eu_total_reach filter"),
+    limit: int = Query(default=100, ge=1, le=500, description="Number of results per page"),
+    offset: int = Query(default=0, ge=0, description="Number of rows to skip"),
     db: pyodbc.Connection = Depends(get_db)
 ):
     try:
@@ -66,47 +69,60 @@ def get_pages(
         # Translate frontend status to DB integer
         db_status = STATUS_MAP_TO_DB.get(status, 0)
         
+        # Use a CTE to deduplicate pages (taking only 1 ad per page) before paginating.
+        # This avoiding duplicates from ads JOIN and makes OFFSET/FETCH NEXT reliable.
         query = """
-            SELECT 
-                pp.Id as PagesProductsId,
-                pg.Page_id,
-                pg.Name,
-                pg.eu_total_reach,
-                pp.status,
-                pp.beneficiary as pp_beneficiary,
-                a.creativeUrl,
-                a.creative_type,
-                a.AdSnapshotUrl
-            FROM pages pg
-            LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
-            LEFT JOIN ads a ON a.pageId = pg.Id
-            WHERE (pp.status = ? OR (pp.status IS NULL AND ? = 0))
+            WITH RankedAds AS (
+                SELECT
+                    pg.Id          AS PageInternalId,
+                    pg.Page_id,
+                    pg.Name,
+                    pg.eu_total_reach,
+                    pg.category    AS pg_category,
+                    pp.status,
+                    pp.beneficiary AS pp_beneficiary,
+                    a.creativeUrl,
+                    a.creative_type,
+                    a.AdSnapshotUrl,
+                    a.reachedCountries,
+                    ROW_NUMBER() OVER (PARTITION BY pg.Id ORDER BY a.Id ASC) AS rn
+                FROM pages pg
+                LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
+                LEFT JOIN ads a ON a.pageId = pg.Id
+                WHERE (pp.status = ? OR (pp.status IS NULL AND ? = 0))
+                  AND pg.eu_total_reach >= ?
         """
-        params = [db_status, db_status]
-        
+        params: List[Any] = [db_status, db_status, min_reach]
+
         if searchTerm and searchTerm != "All":
-            query += " AND pg.Name LIKE ?"
+            query += "                  AND pg.Name LIKE ?\n"
             params.append(f"%{searchTerm}%")
-            
-        # Simplified query without complex country/category filters since we don't know the exact schema for those.
-        # But this gets the core working!
-        query += " ORDER BY pg.eu_total_reach DESC"
-        
-        # VERY basic pagination / limiting for the bridge to not overload
-        #query = query.replace("SELECT", "SELECT TOP 100")
-        
+
+        if category and category != "All":
+            query += "                  AND pg.category = ?\n"
+            params.append(category)
+
+        if country and country != "All" and country != "ALL":
+            # Finding pages where any ad reached this country
+            # This is slow with large dataset if not indexed, but standard for this schema
+            query += "                  AND a.reachedCountries LIKE ?\n"
+            params.append(f"%{country}%")
+
+        query += """
+            )
+            SELECT *
+            FROM RankedAds
+            WHERE rn = 1
+            ORDER BY eu_total_reach DESC
+            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+        """
+        params.extend([offset, limit])
+
         cursor.execute(query, params)
         rows = cursor.fetchall()
         
         results = []
-        # Group by page_id since LEFT JOIN ads might return duplicates
-        seen_pages = set()
-        
         for row in rows:
-            if row.Page_id in seen_pages:
-                continue
-            seen_pages.add(row.Page_id)
-            
             top_creative = None
             if row.creativeUrl or row.AdSnapshotUrl:
                 c_type_str = CREATIVE_TYPE_MAP.get(row.creative_type, "image") if row.creative_type else "image"
@@ -121,7 +137,7 @@ def get_pages(
             results.append(PageData(
                 page_id=row.Page_id,
                 name=row.Name or "Unknown",
-                country="", # Placeholder for now
+                country="",
                 total_eu_reach=row.eu_total_reach or 0,
                 manual_status=ui_status,
                 beneficiary=row.pp_beneficiary or "",
