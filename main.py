@@ -93,7 +93,7 @@ def get_pages(
         query += " ORDER BY pg.eu_total_reach DESC"
         
         # VERY basic pagination / limiting for the bridge to not overload
-        query = query.replace("SELECT", "SELECT TOP 100")
+        #query = query.replace("SELECT", "SELECT TOP 100")
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
