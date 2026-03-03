@@ -47,6 +47,8 @@ class PageData(BaseModel):
     total_eu_reach: int
     manual_status: str
     beneficiary: Optional[str] = None
+    tag: Optional[str] = None
+    tagId: Optional[int] = None
     top_creative: Optional[TopCreative] = None
 
 class StatusUpdateRequest(BaseModel):
@@ -79,13 +81,15 @@ def get_pages(
                     pg.Name,
                     pg.eu_total_reach,
                     pg.category    AS pg_category,
+                    pg.TagName,
+                    pg.TagId,
                     pp.status,
                     pp.beneficiary AS pp_beneficiary,
                     a.creativeUrl,
                     a.creative_type,
                     a.AdSnapshotUrl,
                     a.reachedCountries,
-                    ROW_NUMBER() OVER (PARTITION BY pg.Id ORDER BY a.Id ASC) AS rn
+                    ROW_NUMBER() OVER (PARTITION BY pg.Page_id ORDER BY a.Id ASC) AS rn
                 FROM pages pg
                 LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
                 LEFT JOIN ads a ON a.pageId = pg.Id
@@ -141,6 +145,8 @@ def get_pages(
                 total_eu_reach=row.eu_total_reach or 0,
                 manual_status=ui_status,
                 beneficiary=row.pp_beneficiary or "",
+                tag=row.TagName,
+                tagId=row.TagId,
                 top_creative=top_creative
             ))
             
@@ -231,3 +237,72 @@ def create_search_term(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- Tags Management ---
+
+class TagResponse(BaseModel):
+    Id: int
+    Name: str
+
+class TagCreateRequest(BaseModel):
+    name: str
+
+class TagUpdateRequest(BaseModel):
+    tagId: Optional[int] = None
+    tagName: Optional[str] = None
+
+@app.get("/api/tags", response_model=List[TagResponse])
+def get_tags(db: pyodbc.Connection = Depends(get_db)):
+    try:
+        cursor = db.cursor()
+        cursor.execute("SELECT Id, Name FROM tags ORDER BY Name ASC")
+        rows = cursor.fetchall()
+        return [{"Id": row.Id, "Name": row.Name} for row in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tags: {e}")
+
+@app.post("/api/tags", response_model=TagResponse)
+def create_tag(tag: TagCreateRequest, db: pyodbc.Connection = Depends(get_db)):
+    try:
+        cursor = db.cursor()
+        # Verify it doesnt exist
+        cursor.execute("SELECT Id, Name FROM tags WHERE Name = ?", tag.name)
+        existing = cursor.fetchone()
+        if existing:
+            return {"Id": existing.Id, "Name": existing.Name}
+            
+        # SQL Server PyODBC syntax for OUTPUT inserted.Id doesn't easily return the value with execute, using @@IDENTITY
+        cursor.execute("INSERT INTO tags (Name) VALUES (?)", tag.name)
+        cursor.execute("SELECT @@IDENTITY AS Id")
+        new_id = int(cursor.fetchone().Id)
+        db.commit()
+        return {"Id": new_id, "Name": tag.name}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create tag: {e}")
+
+@app.delete("/api/tags/{tag_id}")
+def delete_tag(tag_id: int, db: pyodbc.Connection = Depends(get_db)):
+    try:
+        cursor = db.cursor()
+        # Sync: remove this tag from any assigned pages before deleting the tag
+        cursor.execute("UPDATE pages SET TagId = NULL, TagName = NULL WHERE TagId = ?", tag_id)
+        # Delete from tags
+        cursor.execute("DELETE FROM tags WHERE Id = ?", tag_id)
+        db.commit()
+        return {"message": "Tag deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete tag: {e}")
+
+@app.patch("/api/pages/{page_id}/tag")
+def update_page_tag(page_id: str, request: TagUpdateRequest, db: pyodbc.Connection = Depends(get_db)):
+    try:
+        cursor = db.cursor()
+        query = "UPDATE pages SET TagId = ?, TagName = ? WHERE Page_id = ?"
+        cursor.execute(query, (request.tagId, request.tagName, page_id))
+        db.commit()
+        return {"message": "Page tag updated successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update tag: {e}")
