@@ -245,6 +245,18 @@ def create_search_term(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- Countries Management ---
+
+@app.get("/api/countries", response_model=List[str])
+def get_countries(db: pyodbc.Connection = Depends(get_db)):
+    try:
+        cursor = db.cursor()
+        cursor.execute("SELECT DISTINCT Name FROM niches ORDER BY Name ASC")
+        rows = cursor.fetchall()
+        return [row.Name for row in rows if row.Name]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch countries: {e}")
+
 # --- Tags Management ---
 
 class TagResponse(BaseModel):
