@@ -169,19 +169,15 @@ def update_page_status(
             
         cursor = db.cursor()
         
-        # 1. Find the Page.Id from page_id string
-        cursor.execute("SELECT Id FROM pages WHERE Page_id = ?", [page_id])
-        page_row = cursor.fetchone()
-        
-        if not page_row:
-            raise HTTPException(status_code=404, detail="Page not found")
-            
-        internal_page_id = page_row.Id
-        
-        # 2. Update pagesProducts using that PageId
+        # Execute bulk update on pagesProducts joining via the target Page_id
+        # This safely updates all "cloned" records sharing the Meta Page_id
         cursor.execute(
-            "UPDATE pagesProducts SET status = ? WHERE pageId = ?", 
-            [db_status, internal_page_id]
+            """
+            UPDATE pagesProducts 
+            SET status = ? 
+            WHERE pageId IN (SELECT Id FROM pages WHERE Page_id = ?)
+            """, 
+            [db_status, page_id]
         )
         db.commit()
         
