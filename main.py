@@ -92,6 +92,7 @@ def get_pages(
                     ROW_NUMBER() OVER (PARTITION BY pg.Page_id ORDER BY a.Id ASC) AS rn
                 FROM pages pg
                 LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
+                LEFT JOIN niches n ON pp.nicheId = n.Id
                 LEFT JOIN ads a ON a.pageId = pg.Id
                 WHERE (pp.status = ? OR (pp.status IS NULL AND ? = 0))
                   AND pg.eu_total_reach >= ?
@@ -107,10 +108,9 @@ def get_pages(
             params.append(category)
 
         if country and country != "All" and country != "ALL":
-            # Finding pages where any ad reached this country
-            # This is slow with large dataset if not indexed, but standard for this schema
-            query += "                  AND a.reachedCountries LIKE ?\n"
-            params.append(f"%{country}%")
+            # Check country by relating to niche name
+            query += "                  AND n.Name = ?\n"
+            params.append(country)
 
         query += """
             )
