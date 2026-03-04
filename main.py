@@ -169,14 +169,25 @@ def update_page_status(
             
         cursor = db.cursor()
         
-        # Execute bulk update on pagesProducts joining via the target Page_id
-        # This safely updates all "cloned" records sharing the Meta Page_id
+        # 1. Update existing pagesProducts
         cursor.execute(
             """
             UPDATE pagesProducts 
             SET status = ? 
             WHERE pageId IN (SELECT Id FROM pages WHERE Page_id = ?)
             """, 
+            [db_status, page_id]
+        )
+        
+        # 2. Insert missing pagesProducts for clones
+        cursor.execute(
+            """
+            INSERT INTO pagesProducts (pageId, nicheId, total_reach, total_ads, date_updated, status)
+            SELECT p.Id, ISNULL((SELECT TOP 1 Id FROM niches), 1), ISNULL(p.eu_total_reach, 0), 1, GETUTCDATE(), ?
+            FROM pages p
+            LEFT JOIN pagesProducts pp ON pp.pageId = p.Id
+            WHERE p.Page_id = ? AND pp.Id IS NULL
+            """,
             [db_status, page_id]
         )
         db.commit()
