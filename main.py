@@ -313,3 +313,31 @@ def update_page_tag(page_id: str, request: TagUpdateRequest, db: pyodbc.Connecti
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update tag: {e}")
+
+# --- AI Integrations ---
+class ExplainCompanyRequest(BaseModel):
+    page_name: str
+
+@app.post("/api/explain_company")
+async def explain_company(request: ExplainCompanyRequest):
+    import os
+    try:
+        from openai import AsyncOpenAI
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set on the server")
+        
+        client = AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful business analyst assistant. Always respond in English with a concise paragraph explaining what the given company does based on its name. Keep it short, direct, and informative. If you don't know the company perfectly, provide an educated guess based on keywords in the name."},
+                {"role": "user", "content": f"What does this company do: {request.page_name}"}
+            ],
+            max_tokens=200
+        )
+        return {"explanation": response.choices[0].message.content.strip()}
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openai module is not installed on the server.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
