@@ -45,6 +45,8 @@ class PageData(BaseModel):
     name: str
     country: str = ""
     total_eu_reach: int
+    active_eu_total_reach: Optional[int] = None
+    active_ads_count: Optional[int] = None
     manual_status: str
     beneficiary: Optional[str] = None
     tag: Optional[str] = None
@@ -81,6 +83,8 @@ def get_pages(
                     pg.Page_id,
                     pg.Name,
                     pg.eu_total_reach,
+                    pg.active_eu_total_reach,
+                    pg.active_ads_count,
                     pg.category    AS pg_category,
                     pg.TagName,
                     pg.TagId,
@@ -148,6 +152,8 @@ def get_pages(
                 name=row.Name or "Unknown",
                 country="",
                 total_eu_reach=row.eu_total_reach or 0,
+                active_eu_total_reach=row.active_eu_total_reach,
+                active_ads_count=row.active_ads_count,
                 manual_status=ui_status,
                 beneficiary=row.pp_beneficiary or "",
                 tag=row.TagName,
