@@ -60,6 +60,7 @@ def get_pages(
     searchTerm: Optional[str] = None,
     country: Optional[str] = None,
     category: Optional[str] = None,
+    tag: Optional[str] = None,
     min_reach: int = Query(default=200000, ge=0, description="Minimum eu_total_reach filter"),
     limit: int = Query(default=100, ge=1, le=500, description="Number of results per page"),
     offset: int = Query(default=0, ge=0, description="Number of rows to skip"),
@@ -111,6 +112,10 @@ def get_pages(
             # Check country by relating to niche name
             query += "                  AND n.Name = ?\n"
             params.append(country)
+
+        if tag and tag != "All":
+            query += "                  AND pg.TagName = ?\n"
+            params.append(tag)
 
         query += """
             )
