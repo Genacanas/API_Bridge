@@ -8,12 +8,27 @@ import json
 from database import get_db_connection
 
 
+def get_backend_db_connection():
+    """Conexión a la BD 'backend' donde viven los accessTokens."""
+    import pyodbc, os
+    SERVER = os.environ.get('DB_SERVER', 'nichebreakerdb.database.windows.net')
+    USERNAME = os.environ.get('DB_USER', 'backendTest')
+    PASSWORD = os.environ.get('DB_PASSWORD', 'Xk9#mP2$vL7@nQ4!')
+    DRIVER = os.environ.get('DB_DRIVER', '{ODBC Driver 18 for SQL Server}')
+    if os.name == 'nt':
+        DRIVER = '{SQL Server}'
+    conn_str = (
+        f"DRIVER={DRIVER};SERVER={SERVER};DATABASE=backend;"
+        f"UID={USERNAME};PWD={PASSWORD};Encrypt=yes;TrustServerCertificate=yes;"
+    )
+    return pyodbc.connect(conn_str)
+
+
 def get_available_access_token():
-    """Obtiene un token de acceso disponible de la base de datos del backend."""
-    conn = get_db_connection()
+    """Obtiene un token de acceso disponible de la BD 'backend'."""
+    conn = get_backend_db_connection()
     try:
         cursor = conn.cursor()
-        # La tabla accessTokens vive en la BD del backend (dev-milco también la tiene vía la misma conn)
         cursor.execute("""
             SELECT TOP 1 accessToken 
             FROM accessTokens 
@@ -23,7 +38,38 @@ def get_available_access_token():
         row = cursor.fetchone()
         if row:
             return row[0]
+        print("[meta_service] No tokens found with status='READY' in 'backend' DB")
         return None
+    except Exception as e:
+        print(f"[meta_service] Error querying accessTokens: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def set_analyzing_marker(page_id: str):
+    """Escribe el marcador __ANALYZING__ en la BD para la page dada."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pages SET AdGroupsJson = '__ANALYZING__' WHERE Page_id = ?", page_id)
+        conn.commit()
+        print(f"[meta_service] Set ANALYZING marker for page {page_id}")
+    except Exception as e:
+        print(f"[meta_service] Could not set ANALYZING marker: {e}")
+    finally:
+        conn.close()
+
+
+def clear_analyzing_marker(page_id: str):
+    """Limpia el marcador __ANALYZING__ si el proceso falla."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pages SET AdGroupsJson = NULL WHERE Page_id = ? AND AdGroupsJson = '__ANALYZING__'", page_id)
+        conn.commit()
+    except Exception:
+        pass
     finally:
         conn.close()
 
@@ -115,50 +161,40 @@ async def analyze_and_save_page_groups(page_id: str):
     3. Agrupa por cuerpo creativo.
     4. Guarda el JSON en pages.AdGroupsJson.
     """
-    print(f"[meta_service] Starting ad group analysis for page_id={page_id}")
-
-    access_token = get_available_access_token()
-    if not access_token:
-        print(f"[meta_service] No access token available. Aborting.")
-        return
-
-    # Marcar como "analizando" en la BD para que el frontend lo sepa incluso tras recargar
-    conn = get_db_connection()
     try:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE pages SET AdGroupsJson = '__ANALYZING__' WHERE Page_id = ?", page_id)
-        conn.commit()
-    except Exception as e:
-        print(f"[meta_service] Could not set ANALYZING marker: {e}")
-    finally:
-        conn.close()
+        print(f"[meta_service] Starting ad group analysis for page_id={page_id}")
 
-    ads = await fetch_all_page_ads(page_id, access_token)
-    print(f"[meta_service] Fetched {len(ads)} ads for page {page_id}")
+        access_token = get_available_access_token()
+        if not access_token:
+            print(f"[meta_service] No access token with status='READY' found. Aborting.")
+            clear_analyzing_marker(page_id)
+            return
 
-    groups = group_ads_by_body(ads)
-    print(f"[meta_service] Grouped into {len(groups)} groups")
+        ads = await fetch_all_page_ads(page_id, access_token)
+        print(f"[meta_service] Fetched {len(ads)} ads for page {page_id}")
 
-    groups_json = json.dumps(groups, ensure_ascii=False)
+        groups = group_ads_by_body(ads)
+        print(f"[meta_service] Grouped into {len(groups)} groups")
 
-    # Guardar en la BD
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pages SET AdGroupsJson = ? WHERE Page_id = ?",
-            (groups_json, page_id)
-        )
-        conn.commit()
-        print(f"[meta_service] Saved AdGroupsJson for page {page_id} ({len(groups)} groups)")
-    except Exception as e:
-        print(f"[meta_service] Error saving to DB: {e}")
-        # Limpiar el marcador para que no quede trabado en 'ANALYZING'
+        groups_json = json.dumps(groups, ensure_ascii=False)
+
+        # Guardar en la BD
+        conn = get_db_connection()
         try:
-            cursor.execute("UPDATE pages SET AdGroupsJson = NULL WHERE Page_id = ?", page_id)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pages SET AdGroupsJson = ? WHERE Page_id = ?",
+                (groups_json, page_id)
+            )
             conn.commit()
-        except Exception:
-            pass
-        conn.rollback()
-    finally:
-        conn.close()
+            print(f"[meta_service] Saved AdGroupsJson for page {page_id} ({len(groups)} groups)")
+        except Exception as e:
+            print(f"[meta_service] Error saving to DB: {e}")
+            conn.rollback()
+            clear_analyzing_marker(page_id)
+        finally:
+            conn.close()
+
+    except Exception as e:
+        print(f"[meta_service] Unexpected error in analyze_and_save_page_groups: {e}")
+        clear_analyzing_marker(page_id)

@@ -349,9 +349,11 @@ async def trigger_ad_group_analysis(
 ):
     """
     Dispara el análisis de grupos de anuncios para la página dada.
-    El proceso ocurre en background. Retorna 202 inmediatamente.
+    Escribe __ANALYZING__ en la BD de forma síncrona y luego lanza el proceso en background.
     """
-    from meta_service import analyze_and_save_page_groups
+    from meta_service import analyze_and_save_page_groups, set_analyzing_marker
+    # Escribir marcador de forma síncrona para que el frontend lo vea de inmediato
+    set_analyzing_marker(page_id)
     background_tasks.add_task(analyze_and_save_page_groups, page_id)
     return {"message": "Analysis started", "page_id": page_id}
 
