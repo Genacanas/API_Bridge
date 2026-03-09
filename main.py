@@ -118,8 +118,11 @@ def get_pages(
             params.append(country)
 
         if tag and tag != "All":
-            query += "                  AND pg.TagName = ?\n"
-            params.append(tag)
+            if tag == "Untagged":
+                query += "                  AND pg.TagName IS NULL\n"
+            else:
+                query += "                  AND pg.TagName = ?\n"
+                params.append(tag)
 
         query += """
             )
