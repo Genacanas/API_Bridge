@@ -122,6 +122,17 @@ async def analyze_and_save_page_groups(page_id: str):
         print(f"[meta_service] No access token available. Aborting.")
         return
 
+    # Marcar como "analizando" en la BD para que el frontend lo sepa incluso tras recargar
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pages SET AdGroupsJson = '__ANALYZING__' WHERE Page_id = ?", page_id)
+        conn.commit()
+    except Exception as e:
+        print(f"[meta_service] Could not set ANALYZING marker: {e}")
+    finally:
+        conn.close()
+
     ads = await fetch_all_page_ads(page_id, access_token)
     print(f"[meta_service] Fetched {len(ads)} ads for page {page_id}")
 
@@ -142,6 +153,12 @@ async def analyze_and_save_page_groups(page_id: str):
         print(f"[meta_service] Saved AdGroupsJson for page {page_id} ({len(groups)} groups)")
     except Exception as e:
         print(f"[meta_service] Error saving to DB: {e}")
+        # Limpiar el marcador para que no quede trabado en 'ANALYZING'
+        try:
+            cursor.execute("UPDATE pages SET AdGroupsJson = NULL WHERE Page_id = ?", page_id)
+            conn.commit()
+        except Exception:
+            pass
         conn.rollback()
     finally:
         conn.close()

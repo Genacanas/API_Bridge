@@ -382,6 +382,9 @@ def get_ad_groups(
         if ad_groups_json is None:
             return {"status": "not_requested", "groups": None}
 
+        if ad_groups_json == "__ANALYZING__":
+            return {"status": "processing", "groups": None}
+
         groups = json_lib.loads(ad_groups_json)
         return {"status": "done", "groups": groups}
 
