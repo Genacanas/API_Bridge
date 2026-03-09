@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Query, HTTPException
+from fastapi import FastAPI, Depends, Query, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Any
@@ -339,6 +339,57 @@ def update_page_tag(page_id: str, request: TagUpdateRequest, db: pyodbc.Connecti
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update tag: {e}")
+
+# --- Ad Groups Analysis ---
+
+@app.post("/api/pages/{page_id}/analyze-groups", status_code=202)
+async def trigger_ad_group_analysis(
+    page_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Dispara el análisis de grupos de anuncios para la página dada.
+    El proceso ocurre en background. Retorna 202 inmediatamente.
+    """
+    from meta_service import analyze_and_save_page_groups
+    background_tasks.add_task(analyze_and_save_page_groups, page_id)
+    return {"message": "Analysis started", "page_id": page_id}
+
+
+@app.get("/api/pages/{page_id}/ad-groups")
+def get_ad_groups(
+    page_id: str,
+    db: pyodbc.Connection = Depends(get_db)
+):
+    """
+    Retorna los grupos de anuncios calculados para la página dada.
+    Si aún no se analizó, retorna status='not_requested'.
+    Si está procesando (AdGroupsJson es NULL pero fue solicitado), retorna status='processing'.
+    Si tiene datos, retorna status='done' con la lista de grupos.
+    """
+    try:
+        import json as json_lib
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT AdGroupsJson FROM pages WHERE Page_id = ?",
+            page_id
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Page not found")
+
+        ad_groups_json = row[0]
+        if ad_groups_json is None:
+            return {"status": "not_requested", "groups": None}
+
+        groups = json_lib.loads(ad_groups_json)
+        return {"status": "done", "groups": groups}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- AI Integrations ---
 class ExplainCompanyRequest(BaseModel):
