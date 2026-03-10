@@ -80,7 +80,7 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
     de la página dada. Retorna una lista de dicts con los campos básicos.
     Limita a 2.000.000 de eu_total_reach acumulado para no tardar demasiado.
     """
-    fields = "ad_snapshot_url,eu_total_reach,ad_creative_bodies"
+    fields = "ad_snapshot_url,eu_total_reach,ad_creative_bodies,ad_delivery_start_time,ad_delivery_stop_time,status"
     limit = 500
     base_url = (
         f"https://graph.facebook.com/v24.0/ads_archive"
@@ -128,10 +128,13 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
 def group_ads_by_body(ads: list) -> list:
     """
     Agrupa los anuncios por su primer `ad_creative_bodies`.
-    Por cada grupo retorna: reach total, lista de links (ad_snapshot_url).
+    Por cada grupo retorna: reach total, si está activo, y lista de links detallados.
     Ordenado de mayor a menor reach.
     """
+    from datetime import datetime
+    
     groups: dict[str, dict] = {}
+    now_date = datetime.utcnow().date()
 
     for ad in ads:
         bodies = ad.get("ad_creative_bodies") or []
@@ -141,16 +144,89 @@ def group_ads_by_body(ads: list) -> list:
             groups[key] = {
                 "body": key,
                 "reach": 0,
+                "is_active": False,
                 "links": []
             }
 
         groups[key]["reach"] += ad.get("eu_total_reach", 0)
         snapshot = ad.get("ad_snapshot_url")
+        
+        # Meta API logic: ad is active if stop_time is absent, or if it's strictly in the future.
+        stop_time_str = ad.get("ad_delivery_stop_time")
+        is_active = False
+        if not stop_time_str:
+            is_active = True
+        else:
+            try:
+                stop_date = datetime.strptime(stop_time_str, "%Y-%m-%d").date()
+                if stop_date > now_date:
+                    is_active = True
+            except ValueError:
+                pass # Default to inactive if we can't parse
+
+        if is_active:
+            groups[key]["is_active"] = True
+
         if snapshot:
-            groups[key]["links"].append(snapshot)
+            groups[key]["links"].append({
+                "url": snapshot,
+                "is_active": is_active,
+                "reach": ad.get("eu_total_reach", 0),
+                "start_time": ad.get("ad_delivery_start_time"),
+                "stop_time": stop_time_str
+            })
 
     result = sorted(groups.values(), key=lambda g: g["reach"], reverse=True)
     return result
+
+
+def build_activity_graph(ads: list) -> list:
+    """
+    Construye un historial de actividad agrupando la cantidad de anuncios activos
+    por semana ('YYYY-Www') basándose en ad_delivery_start_time y ad_delivery_stop_time.
+    """
+    from datetime import datetime, timedelta
+    from collections import defaultdict
+    
+    counts_per_week = defaultdict(int)
+    
+    for ad in ads:
+        start_str = ad.get("ad_delivery_start_time")
+        if not start_str:
+            continue
+            
+        try:
+            # Meta format is generally "YYYY-MM-DD"
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+            
+        stop_str = ad.get("ad_delivery_stop_time")
+        # If no stop time it means the ad is still active or never had an end date set
+        if stop_str:
+            try:
+                stop_date = datetime.strptime(stop_str, "%Y-%m-%d").date()
+            except ValueError:
+                stop_date = datetime.utcnow().date()
+        else:
+             stop_date = datetime.utcnow().date()
+             
+        # Normalize to the Monday of the starting week
+        current_date = start_date - timedelta(days=start_date.weekday())
+        
+        while current_date <= stop_date:
+            # ISO format e.g. "2023-W41"
+            iso_year, iso_week, _ = current_date.isocalendar()
+            week_key = f"{iso_year}-W{iso_week:02d}"
+            counts_per_week[week_key] += 1
+            
+            # Move to next week
+            current_date += timedelta(days=7)
+
+    # Convert to sorted list format
+    sorted_weeks = sorted(counts_per_week.keys())
+    graph_data = [{"week": w, "active_count": counts_per_week[w]} for w in sorted_weeks]
+    return graph_data
 
 
 async def analyze_and_save_page_groups(page_id: str):
@@ -175,15 +251,22 @@ async def analyze_and_save_page_groups(page_id: str):
 
         groups = group_ads_by_body(ads)
         print(f"[meta_service] Grouped into {len(groups)} groups")
+        
+        graph = build_activity_graph(ads)
 
-        groups_json = json.dumps(groups, ensure_ascii=False)
+        final_data = {
+             "groups": groups,
+             "activity_graph": graph
+        }
+
+        groups_json = json.dumps(final_data, ensure_ascii=False)
 
         # Guardar en la BD
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE pages SET AdGroupsJson = ? WHERE Page_id = ?",
+                "UPDATE pages SET AdGroupsJson = CAST(? AS NVARCHAR(MAX)) WHERE Page_id = ?",
                 (groups_json, page_id)
             )
             conn.commit()
