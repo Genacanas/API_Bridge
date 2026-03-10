@@ -111,10 +111,8 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
                 for ad in ads:
                     total_reach += ad.get("eu_total_reach", 0)
 
-                # Parar si superamos 2M de reach acumulado (igual que el esclavo)
-                if total_reach >= 2_000_000:
-                    print(f"[meta_service] Reached 2M reach limit for page {page_id}. Stopping pagination.")
-                    break
+                # NOTA: Límite de 2M removido para permitir Full Scrape
+                # (Se extraerán todos los anuncios históricos de la página)
 
                 next_url = data.get("paging", {}).get("next")
 
@@ -237,9 +235,12 @@ async def analyze_and_save_page_groups(page_id: str):
         
         graph = build_activity_graph(ads)
 
+        total_scraped_reach = sum(g["reach"] for g in groups)
+
         final_data = {
              "groups": groups,
-             "activity_graph": graph
+             "activity_graph": graph,
+             "total_scraped_reach": total_scraped_reach
         }
 
         groups_json = json.dumps(final_data, ensure_ascii=False)
