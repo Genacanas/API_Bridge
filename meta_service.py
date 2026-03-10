@@ -182,8 +182,8 @@ def group_ads_by_body(ads: list) -> list:
 
 def build_activity_graph(ads: list) -> list:
     """
-    Construye un historial de actividad agrupando la cantidad de anuncios activos
-    por semana ('YYYY-Www') basándose en ad_delivery_start_time y ad_delivery_stop_time.
+    Construye un historial de actividad agrupando la cantidad de anuncios creados
+    por semana ('YYYY-Www') basándose en ad_delivery_start_time.
     """
     from datetime import datetime, timedelta
     from collections import defaultdict
@@ -200,28 +200,11 @@ def build_activity_graph(ads: list) -> list:
             start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
         except ValueError:
             continue
-            
-        stop_str = ad.get("ad_delivery_stop_time")
-        # If no stop time it means the ad is still active or never had an end date set
-        if stop_str:
-            try:
-                stop_date = datetime.strptime(stop_str, "%Y-%m-%d").date()
-            except ValueError:
-                stop_date = datetime.utcnow().date()
-        else:
-             stop_date = datetime.utcnow().date()
              
-        # Normalize to the Monday of the starting week
-        current_date = start_date - timedelta(days=start_date.weekday())
-        
-        while current_date <= stop_date:
-            # ISO format e.g. "2023-W41"
-            iso_year, iso_week, _ = current_date.isocalendar()
-            week_key = f"{iso_year}-W{iso_week:02d}"
-            counts_per_week[week_key] += 1
-            
-            # Move to next week
-            current_date += timedelta(days=7)
+        # ISO format e.g. "2023-W41"
+        iso_year, iso_week, _ = start_date.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        counts_per_week[week_key] += 1
 
     # Convert to sorted list format
     sorted_weeks = sorted(counts_per_week.keys())
