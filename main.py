@@ -1,9 +1,21 @@
 from fastapi import FastAPI, Depends, Query, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional, Any
 import pyodbc
-from database import get_db
+from database import get_db, get_auth_db
+from auth import (
+    Token,
+    verify_password,
+    create_access_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    get_current_active_user,
+    create_users_table_if_not_exists,
+    create_initial_admin,
+    UserInDB
+)
+from datetime import timedelta
 
 app = FastAPI(title="NicheBreaker API Bridge")
 
@@ -15,6 +27,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def startup_event():
+    # Attempt to create the 'users' table in the auth DB if it doesn't exist
+    print("Running startup checks...")
+    try:
+        # We manually create a connection here because Depends() doesn't work in startup event
+        from database import get_auth_db_connection
+        conn = get_auth_db_connection()
+        create_users_table_if_not_exists(conn)
+        create_initial_admin(conn)
+        conn.close()
+        print("Startup checks for users table finished successfully.")
+    except Exception as e:
+        print(f"Error initializing users table: {e}")
+
+@app.post("/api/login", response_model=Token)
+def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: pyodbc.Connection = Depends(get_auth_db)
+):
+    from auth import get_user
+    user = get_user(db, form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
 
 # Mappings between C# Enum (page_process_status) and Frontend Strings
 STATUS_MAP_TO_UI = {
@@ -174,7 +220,8 @@ def get_pages(
 def update_page_status(
     page_id: str,
     update_data: StatusUpdateRequest,
-    db: pyodbc.Connection = Depends(get_db)
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
         db_status = STATUS_MAP_TO_DB.get(update_data.manual_status)
@@ -228,7 +275,8 @@ from datetime import datetime
 @app.post("/api/search_terms")
 def create_search_term(
     term_data: SearchTermRequest,
-    db: pyodbc.Connection = Depends(get_db)
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
         cursor = db.cursor()
@@ -295,7 +343,11 @@ def get_tags(db: pyodbc.Connection = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to fetch tags: {e}")
 
 @app.post("/api/tags", response_model=TagResponse)
-def create_tag(tag: TagCreateRequest, db: pyodbc.Connection = Depends(get_db)):
+def create_tag(
+    tag: TagCreateRequest, 
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     try:
         cursor = db.cursor()
         # Verify it doesnt exist
@@ -315,7 +367,11 @@ def create_tag(tag: TagCreateRequest, db: pyodbc.Connection = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to create tag: {e}")
 
 @app.delete("/api/tags/{tag_id}")
-def delete_tag(tag_id: int, db: pyodbc.Connection = Depends(get_db)):
+def delete_tag(
+    tag_id: int, 
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     try:
         cursor = db.cursor()
         # Sync: remove this tag from any assigned pages before deleting the tag
@@ -329,7 +385,12 @@ def delete_tag(tag_id: int, db: pyodbc.Connection = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to delete tag: {e}")
 
 @app.patch("/api/pages/{page_id}/tag")
-def update_page_tag(page_id: str, request: TagUpdateRequest, db: pyodbc.Connection = Depends(get_db)):
+def update_page_tag(
+    page_id: str, 
+    request: TagUpdateRequest, 
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     try:
         cursor = db.cursor()
         query = "UPDATE pages SET TagId = ?, TagName = ? WHERE Page_id = ?"
@@ -345,7 +406,8 @@ def update_page_tag(page_id: str, request: TagUpdateRequest, db: pyodbc.Connecti
 @app.post("/api/pages/{page_id}/analyze-groups", status_code=202)
 async def trigger_ad_group_analysis(
     page_id: str,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Dispara el análisis de grupos de anuncios para la página dada.
