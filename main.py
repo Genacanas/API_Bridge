@@ -15,7 +15,8 @@ from auth import (
     create_initial_admin,
     UserInDB
 )
-from datetime import timedelta
+from datetime import timedelta, datetime
+import zoneinfo
 
 app = FastAPI(title="NicheBreaker API Bridge")
 
@@ -109,11 +110,12 @@ def get_pages(
     country: Optional[str] = None,
     category: Optional[str] = None,
     tag: Optional[str] = None,
+    action_date: Optional[str] = Query(None, description="Filter by status update date (YYYY-MM-DD)"),
     min_reach: int = Query(default=200000, ge=0, description="Minimum eu_total_reach filter"),
     limit: int = Query(default=100, ge=1, le=500, description="Number of results per page"),
     offset: int = Query(default=0, ge=0, description="Number of rows to skip"),
     db: pyodbc.Connection = Depends(get_db)
-):
+) -> List[PageData]:
     try:
         cursor = db.cursor()
         
@@ -149,6 +151,10 @@ def get_pages(
                   AND pg.eu_total_reach >= ?
         """
         params: List[Any] = [db_status, db_status, min_reach]
+
+        if action_date:
+            query += "                  AND CONVERT(DATE, pp.status_updated_at) = ?\n"
+            params.append(action_date)
 
         if searchTerm and searchTerm != "All":
             query += "                  AND pg.Name LIKE ?\n"
@@ -230,26 +236,37 @@ def update_page_status(
             
         cursor = db.cursor()
         
+        # Calculate Lithuanian time
+        try:
+            tz = zoneinfo.ZoneInfo("Europe/Vilnius")
+        except zoneinfo.ZoneInfoNotFoundError:
+            # Fallback for environments without tzdata locally installed (like Windows temporarily)
+            # but in production/linux it will use Europe/Vilnius
+            from datetime import timezone
+            tz = timezone(timedelta(hours=2)) # Lithuania is UTC+2 (or +3 in summer, but +2 is standard)
+            
+        lithuanian_now = datetime.now(tz)
+
         # 1. Update existing pagesProducts
         cursor.execute(
             """
             UPDATE pagesProducts 
-            SET status = ? 
+            SET status = ?, status_updated_at = ?
             WHERE pageId IN (SELECT Id FROM pages WHERE Page_id = ?)
             """, 
-            [db_status, page_id]
+            [db_status, lithuanian_now, page_id]
         )
         
         # 2. Insert missing pagesProducts for clones
         cursor.execute(
             """
-            INSERT INTO pagesProducts (pageId, nicheId, total_reach, total_ads, date_updated, status)
-            SELECT p.Id, ISNULL((SELECT TOP 1 Id FROM niches), 1), ISNULL(p.eu_total_reach, 0), 1, GETUTCDATE(), ?
+            INSERT INTO pagesProducts (pageId, nicheId, total_reach, total_ads, date_updated, status, status_updated_at)
+            SELECT p.Id, ISNULL((SELECT TOP 1 Id FROM niches), 1), ISNULL(p.eu_total_reach, 0), 1, GETUTCDATE(), ?, ?
             FROM pages p
             LEFT JOIN pagesProducts pp ON pp.pageId = p.Id
             WHERE p.Page_id = ? AND pp.Id IS NULL
             """,
-            [db_status, page_id]
+            [db_status, lithuanian_now, page_id]
         )
         db.commit()
         
