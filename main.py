@@ -99,6 +99,7 @@ class PageData(BaseModel):
     tag: Optional[str] = None
     tagId: Optional[int] = None
     top_creative: Optional[TopCreative] = None
+    is_queued_for_scrape: bool = False
 
 class StatusUpdateRequest(BaseModel):
     manual_status: str
@@ -124,7 +125,18 @@ def get_pages(
         
         # Use a CTE to deduplicate pages (taking only 1 ad per page) before paginating.
         # This avoiding duplicates from ads JOIN and makes OFFSET/FETCH NEXT reliable.
-        query = """
+        
+        # Always include status 0 (unprocessed) and 7 (queued for scrape).
+        # Additionally add the tab-specific status.
+        db_statuses = [0]
+        if status == "saved":
+            db_statuses = [7, 11]
+        elif status == "deleted":
+            db_statuses = [13]
+            
+        status_placeholders = ",".join(["?"] * len(db_statuses))
+            
+        query = f"""
             WITH RankedAds AS (
                 SELECT
                     pg.Id          AS PageInternalId,
@@ -147,10 +159,13 @@ def get_pages(
                 LEFT JOIN pagesProducts pp ON pp.pageId = pg.Id
                 LEFT JOIN niches n ON pp.nicheId = n.Id
                 LEFT JOIN ads a ON a.pageId = pg.Id
-                WHERE (pp.status = ? OR (pp.status IS NULL AND ? = 0))
+                WHERE (pp.status IN ({status_placeholders}) OR (pp.status IS NULL AND ? = 0))
                   AND pg.eu_total_reach >= ?
         """
-        params: List[Any] = [db_status, db_status, min_reach]
+        params: List[Any] = []
+        params.extend(db_statuses)
+        params.append(db_statuses[0])
+        params.append(min_reach)
 
         if action_date:
             query += "                  AND CONVERT(DATE, pp.status_updated_at) = ?\n"
@@ -209,11 +224,12 @@ def get_pages(
                 total_eu_reach=row.eu_total_reach or 0,
                 active_eu_total_reach=row.active_eu_total_reach,
                 active_ads_count=row.active_ads_count,
-                manual_status=ui_status,
+                manual_status="unprocessed" if row.status in (0, 7) else ui_status,
                 beneficiary=row.pp_beneficiary or "",
                 tag=row.TagName,
                 tagId=row.TagId,
-                top_creative=top_creative
+                top_creative=top_creative,
+                is_queued_for_scrape=(row.status == 7)
             ))
             
         return results
@@ -272,6 +288,76 @@ def update_page_status(
         
         return {"success": True, "message": "Status updated successfully"}
         
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/pages/{page_id}/trigger-full-scrape")
+def trigger_full_scrape(
+    page_id: str,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        
+        try:
+            tz = zoneinfo.ZoneInfo("Europe/Vilnius")
+        except zoneinfo.ZoneInfoNotFoundError:
+            from datetime import timezone
+            tz = timezone(timedelta(hours=2))
+            
+        lithuanian_now = datetime.now(tz)
+
+        # 1. Update existing pagesProducts
+        cursor.execute(
+            """
+            UPDATE pagesProducts 
+            SET status = 7, scrappingType = 0, status_updated_at = ?
+            WHERE pageId IN (SELECT Id FROM pages WHERE Page_id = ?)
+            """, 
+            [lithuanian_now, page_id]
+        )
+        
+        # 2. Insert missing pagesProducts for clones
+        cursor.execute(
+            """
+            INSERT INTO pagesProducts (pageId, nicheId, total_reach, total_ads, date_updated, status, scrappingType, status_updated_at)
+            SELECT p.Id, ISNULL((SELECT TOP 1 Id FROM niches), 1), ISNULL(p.eu_total_reach, 0), 1, GETUTCDATE(), 7, 0, ?
+            FROM pages p
+            LEFT JOIN pagesProducts pp ON pp.pageId = p.Id
+            WHERE p.Page_id = ? AND pp.Id IS NULL
+            """,
+            [lithuanian_now, page_id]
+        )
+        db.commit()
+        
+        return {"success": True, "message": "Triggered full page scrape"}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/pages/{page_id}/cancel-full-scrape")
+def cancel_full_scrape(
+    page_id: str,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        # Revert to status 11 (Saved/Completed) instead of 0 (Pending)
+        cursor.execute(
+            """
+            UPDATE pagesProducts 
+            SET status = 11, scrappingType = NULL, status_updated_at = GETUTCDATE()
+            WHERE pageId IN (SELECT Id FROM pages WHERE Page_id = ?)
+              AND status = 7
+            """,
+            [page_id]
+        )
+        db.commit()
+        return {"success": True, "message": "Full scrape cancelled, page reverted to pending"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
