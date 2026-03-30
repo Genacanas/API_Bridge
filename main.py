@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Depends, Query, HTTPException, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -115,7 +115,8 @@ def get_pages(
     min_reach: int = Query(default=200000, ge=0, description="Minimum eu_total_reach filter"),
     limit: int = Query(default=100, ge=1, le=500, description="Number of results per page"),
     offset: int = Query(default=0, ge=0, description="Number of rows to skip"),
-    db: pyodbc.Connection = Depends(get_db)
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ) -> List[PageData]:
     try:
         cursor = db.cursor()
@@ -413,7 +414,10 @@ def create_search_term(
 # --- Countries Management ---
 
 @app.get("/api/countries", response_model=List[str])
-def get_countries(db: pyodbc.Connection = Depends(get_db)):
+def get_countries(
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     try:
         cursor = db.cursor()
         cursor.execute("SELECT DISTINCT Name FROM niches ORDER BY Name ASC")
@@ -436,7 +440,10 @@ class TagUpdateRequest(BaseModel):
     tagName: Optional[str] = None
 
 @app.get("/api/tags", response_model=List[TagResponse])
-def get_tags(db: pyodbc.Connection = Depends(get_db)):
+def get_tags(
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     try:
         cursor = db.cursor()
         cursor.execute("SELECT Id, Name FROM tags ORDER BY Name ASC")
@@ -526,7 +533,8 @@ async def trigger_ad_group_analysis(
 @app.get("/api/pages/{page_id}/ad-groups")
 def get_ad_groups(
     page_id: str,
-    db: pyodbc.Connection = Depends(get_db)
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Retorna los grupos de anuncios calculados para la página dada.
@@ -566,7 +574,10 @@ class ExplainCompanyRequest(BaseModel):
     page_name: str
 
 @app.post("/api/explain_company")
-async def explain_company(request: ExplainCompanyRequest):
+async def explain_company(
+    request: ExplainCompanyRequest,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
     import os
     try:
         from openai import AsyncOpenAI
