@@ -80,7 +80,7 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
     de la página dada. Retorna una lista de dicts con los campos básicos.
     Limita a 2.000.000 de eu_total_reach acumulado para no tardar demasiado.
     """
-    fields = "ad_snapshot_url,eu_total_reach,ad_creative_bodies,ad_delivery_start_time,ad_delivery_stop_time,status"
+    fields = "ad_snapshot_url,eu_total_reach,ad_creative_bodies,ad_delivery_start_time,ad_delivery_stop_time,status,target_locations"
     limit = 500
     base_url = (
         f"https://graph.facebook.com/v24.0/ads_archive"
@@ -94,12 +94,38 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
 
     all_ads = []
     total_reach = 0
-    next_url = base_url
+    current_limit = 500
+    
+    # We build the base URL without the limit first to handle retries easily
+    api_base = (
+        f"https://graph.facebook.com/v24.0/ads_archive"
+        f"?ad_reached_countries=['']"
+        f"&search_page_ids={page_id}"
+        f"&fields={fields}"
+        f"&access_token={access_token}"
+        f"&locale=en_US"
+    )
+    
+    next_url = f"{api_base}&limit={current_limit}"
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         while next_url:
             try:
                 response = await client.get(next_url)
+                
+                # Handle "Reduce the amount of data" error (Code 1)
+                if response.status_code == 400:
+                    err_data = response.json().get("error", {})
+                    if err_data.get("code") == 1:
+                        if current_limit > 10:
+                            current_limit = current_limit // 2
+                            print(f"[meta_service] Meta API 'Reduce data' error. Retrying page {page_id} with limit={current_limit}")
+                            
+                            # Replace limit in next_url or rebuild it if it was the initial one
+                            import re
+                            next_url = re.sub(r'limit=\d+', f'limit={current_limit}', next_url)
+                            continue # Retry current request
+                
                 if not response.is_success:
                     print(f"[meta_service] Error {response.status_code} fetching ads for page {page_id}: {response.text[:300]}")
                     break
@@ -115,6 +141,10 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
                 # (Se extraerán todos los anuncios históricos de la página)
 
                 next_url = data.get("paging", {}).get("next")
+                # Ensure the next_url also uses our current reduced limit if it evolved
+                if next_url and current_limit < 150:
+                    import re
+                    next_url = re.sub(r'limit=\d+', f'limit={current_limit}', next_url)
 
             except Exception as e:
                 print(f"[meta_service] Exception fetching ads for page {page_id}: {e}")
@@ -123,15 +153,18 @@ async def fetch_all_page_ads(page_id: str, access_token: str) -> list:
     return all_ads
 
 
-def group_ads_by_body(ads: list) -> list:
+def group_ads_by_body(ads: list) -> tuple[list, dict]:
     """
     Agrupa los anuncios por su primer `ad_creative_bodies`.
     Por cada grupo retorna: reach total, si está activo, y lista de links detallados.
-    Ordenado de mayor a menor reach.
+    Ordenado de mayor a menor reach individual dentro del grupo.
+    También retorna un diccionario con estadísticas de países.
     """
     from datetime import datetime
+    from collections import defaultdict
     
     groups: dict[str, dict] = {}
+    country_counts = defaultdict(int)
     now_date = datetime.utcnow().date()
 
     for ad in ads:
@@ -149,6 +182,30 @@ def group_ads_by_body(ads: list) -> list:
         groups[key]["reach"] += ad.get("eu_total_reach", 0)
         snapshot = ad.get("ad_snapshot_url")
         
+        # Aggregate country stats from target_locations
+        locations = ad.get("target_locations") or []
+        ad_countries = set()
+        for loc in locations:
+            if loc.get("excluded"):
+                continue
+            
+            l_type = loc.get("type")
+            l_name = loc.get("name", "")
+            
+            if l_type == "countries":
+                ad_countries.add(l_name)
+            elif l_type == "zips":
+                # Extract country name after the comma
+                country = l_name.split(",")[-1].strip() if "," in l_name else l_name
+                if country:
+                    ad_countries.add(country)
+            # Skip cities, regions, and others as per user request
+
+        for country in ad_countries:
+            country_counts[country] += 1
+            
+        countries_for_ad = list(ad_countries)
+
         # Meta API logic: ad is active if stop_time is absent, or if it's strictly in the future.
         stop_time_str = ad.get("ad_delivery_stop_time")
         is_active = False
@@ -171,11 +228,22 @@ def group_ads_by_body(ads: list) -> list:
                 "is_active": is_active,
                 "reach": ad.get("eu_total_reach", 0),
                 "start_time": ad.get("ad_delivery_start_time"),
-                "stop_time": stop_time_str
+                "stop_time": stop_time_str,
+                "countries": countries_for_ad
             })
 
-    result = sorted(groups.values(), key=lambda g: g["reach"], reverse=True)
-    return result
+    # Sort groups by total reach
+    sorted_groups = sorted(groups.values(), key=lambda g: g["reach"], reverse=True)
+    
+    # Sort ads within each group by reach descending
+    for group in sorted_groups:
+        group["links"].sort(key=lambda x: x["reach"], reverse=True)
+
+    # Sort country_stats by count descending
+    sorted_countries = sorted(country_counts.items(), key=lambda x: x[1], reverse=True)
+    country_stats = {k: v for k, v in sorted_countries}
+
+    return sorted_groups, country_stats
 
 
 def build_activity_graph(ads: list) -> list:
@@ -230,8 +298,8 @@ async def analyze_and_save_page_groups(page_id: str):
         ads = await fetch_all_page_ads(page_id, access_token)
         print(f"[meta_service] Fetched {len(ads)} ads for page {page_id}")
 
-        groups = group_ads_by_body(ads)
-        print(f"[meta_service] Grouped into {len(groups)} groups")
+        groups, country_stats = group_ads_by_body(ads)
+        print(f"[meta_service] Grouped into {len(groups)} groups and {len(country_stats)} countries")
         
         graph = build_activity_graph(ads)
 
@@ -240,7 +308,8 @@ async def analyze_and_save_page_groups(page_id: str):
         final_data = {
              "groups": groups,
              "activity_graph": graph,
-             "total_scraped_reach": total_scraped_reach
+             "total_scraped_reach": total_scraped_reach,
+             "country_stats": country_stats
         }
 
         groups_json = json.dumps(final_data, ensure_ascii=False)
