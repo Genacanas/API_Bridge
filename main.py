@@ -569,6 +569,39 @@ def get_ad_groups(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/pages/ad-groups/bulk")
+def bulk_clear_ad_groups(
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Limpia el AdGroupsJson de TODAS las páginas que hayan sido analizadas."""
+    try:
+        cursor = db.cursor()
+        cursor.execute("UPDATE pages SET AdGroupsJson = NULL WHERE AdGroupsJson IS NOT NULL")
+        db.commit()
+        return {"message": "All ad group analyses cleared"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/pages/{page_id}/ad-groups")
+def clear_page_ad_groups(
+    page_id: str,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Limpia el AdGroupsJson de una página específica."""
+    try:
+        cursor = db.cursor()
+        cursor.execute("UPDATE pages SET AdGroupsJson = NULL WHERE Page_id = ?", page_id)
+        db.commit()
+        return {"message": f"Ad group analysis for page {page_id} cleared"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- AI Integrations ---
 class ExplainCompanyRequest(BaseModel):
     page_name: str
