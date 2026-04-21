@@ -439,6 +439,17 @@ class TagUpdateRequest(BaseModel):
     tagId: Optional[int] = None
     tagName: Optional[str] = None
 
+class TagRenameRequest(BaseModel):
+    name: str
+
+class BulkReplaceTagsRequest(BaseModel):
+    sourceTagId: int
+    targetTagId: int
+    deleteSource: bool = False
+
+class PageNotesUpdateRequest(BaseModel):
+    notes: str
+
 @app.get("/api/tags", response_model=List[TagResponse])
 def get_tags(
     db: pyodbc.Connection = Depends(get_db),
@@ -510,6 +521,116 @@ def update_page_tag(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update tag: {e}")
+
+@app.patch("/api/tags/{tag_id}")
+def rename_tag(
+    tag_id: int,
+    request: TagRenameRequest,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        
+        # Verify the new name doesn't already exist
+        cursor.execute("SELECT Id FROM tags WHERE Name = ? AND Id != ?", (request.name, tag_id))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="A tag with that name already exists")
+            
+        cursor.execute("UPDATE tags SET Name = ? WHERE Id = ?", (request.name, tag_id))
+        
+        # Also rename denormalized TagName in pages
+        cursor.execute("UPDATE pages SET TagName = ? WHERE TagId = ?", (request.name, tag_id))
+        
+        db.commit()
+        return {"message": "Tag renamed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to rename tag: {e}")
+
+@app.post("/api/tags/bulk-replace")
+def bulk_replace_tags(
+    request: BulkReplaceTagsRequest,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        
+        if request.sourceTagId == request.targetTagId:
+            raise HTTPException(status_code=400, detail="Source and Target tags cannot be the same")
+            
+        # Get target tag name for denormalized updates
+        cursor.execute("SELECT Name FROM tags WHERE Id = ?", (request.targetTagId,))
+        target_row = cursor.fetchone()
+        if not target_row:
+            raise HTTPException(status_code=404, detail="Target tag not found")
+        target_name = target_row.Name
+        
+        # Update all pages that have source tag to target tag
+        cursor.execute(
+            "UPDATE pages SET TagId = ?, TagName = ? WHERE TagId = ?", 
+            (request.targetTagId, target_name, request.sourceTagId)
+        )
+        
+        if request.deleteSource:
+            cursor.execute("DELETE FROM tags WHERE Id = ?", (request.sourceTagId,))
+            
+        db.commit()
+        return {"message": "Tags replaced successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to bulk replace tags: {e}")
+
+@app.get("/api/pages/{page_id}/notes")
+def get_page_notes(
+    page_id: str,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        query = """
+            SELECT TOP 1 pp.page_notes
+            FROM pagesProducts pp
+            INNER JOIN pages p ON pp.pageId = p.Id
+            WHERE p.Page_id = ?
+        """
+        cursor.execute(query, (page_id,))
+        row = cursor.fetchone()
+        
+        notes = row.page_notes if row and hasattr(row, 'page_notes') and row.page_notes else ""
+        return {"notes": notes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch page notes: {e}")
+
+@app.patch("/api/pages/{page_id}/notes")
+def update_page_notes(
+    page_id: str,
+    request: PageNotesUpdateRequest,
+    db: pyodbc.Connection = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        cursor = db.cursor()
+        query = """
+            UPDATE pp
+            SET pp.page_notes = ?
+            FROM pagesProducts pp
+            INNER JOIN pages p ON pp.pageId = p.Id
+            WHERE p.Page_id = ?
+        """
+        cursor.execute(query, (request.notes, page_id))
+        db.commit()
+        return {"message": "Page notes updated successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update page notes: {e}")
+
 
 # --- Ad Groups Analysis ---
 
