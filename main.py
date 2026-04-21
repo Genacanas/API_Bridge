@@ -96,6 +96,7 @@ class PageData(BaseModel):
     active_ads_count: Optional[int] = None
     manual_status: str
     beneficiary: Optional[str] = None
+    notes: Optional[str] = None
     tag: Optional[str] = None
     tagId: Optional[int] = None
     top_creative: Optional[TopCreative] = None
@@ -151,6 +152,7 @@ def get_pages(
                     pg.TagId,
                     pp.status,
                     pp.beneficiary AS pp_beneficiary,
+                    pp.page_notes AS pp_page_notes,
                     a.creativeUrl,
                     a.creative_type,
                     a.AdSnapshotUrl,
@@ -227,6 +229,7 @@ def get_pages(
                 active_ads_count=row.active_ads_count,
                 manual_status="unprocessed" if row.status in (0, 7) else ui_status,
                 beneficiary=row.pp_beneficiary or "",
+                notes=row.pp_page_notes or "",
                 tag=row.TagName,
                 tagId=row.TagId,
                 top_creative=top_creative,
