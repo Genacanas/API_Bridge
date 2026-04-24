@@ -179,8 +179,11 @@ def get_pages(
             params.append(f"%{searchTerm}%")
 
         if category and category != "All":
-            query += "                  AND pg.category = ?\n"
-            params.append(category)
+            if category == "Uncategorized":
+                query += "                  AND pg.category = 'UNKNOWN'\n"
+            else:
+                query += "                  AND pg.category = ?\n"
+                params.append(category)
 
         if country and country != "All" and country != "ALL":
             # Check country by relating to niche name
